@@ -8,8 +8,10 @@
     body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
     main { max-width: 960px; margin: auto; }
     button { padding: .55rem .9rem; cursor: pointer; }
+    input { padding: .45rem .6rem; }
     pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
-    .row { display: flex; gap: 1rem; align-items: center; }
+    .row { display: flex; gap: 1rem; align-items: center; flex-wrap: wrap; margin-bottom: .75rem; }
+    #settlement-summary { font-weight: 600; }
   </style>
 </head>
 <body>
@@ -18,9 +20,25 @@
   <p>最小演示页。完整业务流程通过README中的JSON接口调用。</p>
   <div class="row"><button id="load">加载记录</button><button id="stats">查看状态统计</button></div>
   <pre id="output">点击上方按钮读取服务状态。</pre>
+
+  <h2>按笔累计交收</h2>
+  <div class="row">
+    <input id="record-id" type="number" min="1" value="1" placeholder="记录ID">
+    <button id="load-settlement">查看交收进度</button>
+  </div>
+  <div class="row">
+    <input id="source-ref" placeholder="来源单号">
+    <input id="delivered-quantity" type="number" min="0" placeholder="交收数量">
+    <input id="cash-paid" type="number" min="0" step="0.01" placeholder="交收金额">
+    <input id="operator" placeholder="经办人(默认同登录人)">
+    <button id="submit-settlement">登记交收</button>
+  </div>
+  <p id="settlement-summary"></p>
+  <pre id="settlement-output">交收明细与累计进度显示在这里。</pre>
 </main>
 <script>
 const headers = {"X-User-Id":"demo-admin","X-Role":"admin","X-Org":"demo"};
+const jsonHeaders = Object.assign({"Content-Type":"application/json"}, headers);
 async function show(path) {
   const response = await fetch(path, {headers});
   const data = await response.json();
@@ -28,6 +46,48 @@ async function show(path) {
 }
 document.getElementById("load").onclick = () => show("/api/records?limit=20");
 document.getElementById("stats").onclick = () => show("/api/stats");
+
+function recordId() {
+  return document.getElementById("record-id").value;
+}
+function renderSettlement(record, detail) {
+  const p = detail.progress || {};
+  document.getElementById("settlement-summary").textContent =
+    "状态:" + record.state +
+    " | 已到账数量 " + p.delivered_quantity + "/" + p.required_quantity +
+    " | 已到账金额 " + p.cash_paid + "/" + p.required_amount +
+    " | 还差数量 " + p.remaining_quantity +
+    " | 还差金额 " + p.remaining_amount;
+  document.getElementById("settlement-output").textContent = JSON.stringify(detail.items, null, 2);
+}
+async function loadSettlement() {
+  const [record, detail] = await Promise.all([
+    fetch("/api/records/" + recordId(), {headers}).then(r => r.json()),
+    fetch("/api/records/" + recordId() + "/settlements", {headers}).then(r => r.json()),
+  ]);
+  renderSettlement(record, detail);
+}
+async function submitSettlement() {
+  const record = await (await fetch("/api/records/" + recordId(), {headers})).json();
+  const body = {
+    expected_version: record.version,
+    data: {
+      source_ref: document.getElementById("source-ref").value,
+      delivered_quantity: Number(document.getElementById("delivered-quantity").value),
+      cash_paid: Number(document.getElementById("cash-paid").value),
+      operator: document.getElementById("operator").value,
+    },
+  };
+  const response = await fetch("/api/records/" + recordId() + "/actions/settle", {method: "POST", headers: jsonHeaders, body: JSON.stringify(body)});
+  const result = await response.json();
+  if (!response.ok) {
+    document.getElementById("settlement-output").textContent = JSON.stringify(result, null, 2);
+    return;
+  }
+  await loadSettlement();
+}
+document.getElementById("load-settlement").onclick = loadSettlement;
+document.getElementById("submit-settlement").onclick = submitSettlement;
 </script>
 </body>
 </html>

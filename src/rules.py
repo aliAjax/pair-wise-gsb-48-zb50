@@ -7,7 +7,8 @@ from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, 
 INITIAL_STATE = "captured"
 CREATE_ROLES = {'trader'}
 ACTION_ROLES = {'apply_corporate': {'corporate_actions'}, 'approve': {'settlement_officer'}, 'settle': {'settlement_officer'}, 'fail': {'settlement_officer'}, 'reverse': {'corporate_actions', 'settlement_officer'}}
-TRANSITIONS = {'apply_corporate': {'captured': 'adjusted'}, 'approve': {'captured': 'approved', 'adjusted': 'approved'}, 'settle': {'approved': 'settled'}, 'fail': {'approved': 'failed'}, 'reverse': {'settled': 'reversed', 'failed': 'reversed'}}
+# settle按笔累计：approved/settling可登记交收，达标后由服务层置为settled；已结清或冲正不再接收交收。
+TRANSITIONS = {'apply_corporate': {'captured': 'adjusted'}, 'approve': {'captured': 'approved', 'adjusted': 'approved'}, 'settle': {'approved': 'settling', 'settling': 'settling'}, 'fail': {'approved': 'failed'}, 'reverse': {'settled': 'reversed', 'failed': 'reversed', 'settling': 'reversed'}}
 
 
 class DomainRules:
@@ -59,6 +60,10 @@ class DomainRules:
                 if item["payload"].get("side") == payload.get("side") and item["payload"].get("quantity") == payload.get("quantity") and item["payload"].get("price") == payload.get("price"):
                     raise Conflict("疑似重复结算指令")
 
+    def required_settlement(self, payload: Dict[str, Any]) -> Tuple[int, float]:
+        """结清所需的证券数量与资金金额。"""
+        return int(payload.get("effective_quantity", payload["quantity"])), float(payload["net_amount"])
+
     def require_transition(self, record: Dict[str, Any], action: str) -> str:
         allowed = TRANSITIONS.get(action, {}).get(record["state"])
         if allowed is None:
@@ -81,17 +86,6 @@ class DomainRules:
         elif action == "approve":
             changes["approved_amount"] = p["net_amount"]
             summary = "结算指令复核通过"
-        elif action == "settle":
-            delivered = integer(data, "delivered_quantity", 0)
-            paid = number(data, "cash_paid", 0)
-            required_quantity = int(p.get("effective_quantity", p["quantity"]))
-            if delivered != required_quantity:
-                raise ValidationError("交收证券数量不匹配")
-            if paid < float(p["net_amount"]):
-                raise ValidationError("交收资金不足")
-            changes["delivered_quantity"] = delivered
-            changes["cash_paid"] = paid
-            summary = "交收完成"
         elif action == "fail":
             changes["fail_reason"] = text(data, "fail_reason")
             summary = "交收失败"

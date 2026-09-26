@@ -47,8 +47,19 @@ class Repository:
                     details TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS settlement_entries (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    record_id INTEGER NOT NULL REFERENCES records(id) ON DELETE CASCADE,
+                    source_ref TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    amount REAL NOT NULL,
+                    operator TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(record_id, source_ref)
+                );
                 CREATE INDEX IF NOT EXISTS idx_records_state ON records(state);
                 CREATE INDEX IF NOT EXISTS idx_audit_record ON audit_events(record_id, id);
+                CREATE INDEX IF NOT EXISTS idx_settlement_record ON settlement_entries(record_id, id);
                 """
             )
 
@@ -103,6 +114,44 @@ class Repository:
             if int(row["version"]) != int(expected_version):
                 connection.rollback()
                 raise Conflict("版本冲突，请刷新后重试")
+            version = int(expected_version) + 1
+            connection.execute(
+                "UPDATE records SET state=?,version=?,payload=?,updated_by=?,updated_at=? WHERE id=?",
+                (state, version, json.dumps(payload, ensure_ascii=False, sort_keys=True), actor_id, now, record_id),
+            )
+            connection.execute(
+                "INSERT INTO audit_events(record_id,action,actor_id,version,details,created_at) VALUES(?,?,?,?,?,?)",
+                (record_id, action, actor_id, version, json.dumps(details, ensure_ascii=False, sort_keys=True), now),
+            )
+            result = connection.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
+            connection.commit()
+        return self._row(result)
+
+    def list_settlements(self, record_id: int) -> List[Dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM settlement_entries WHERE record_id=? ORDER BY id", (record_id,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def record_settlement(self, record_id: int, expected_version: int, entry: Dict[str, Any], state: str, payload: Dict[str, Any], actor_id: str, action: str, details: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """单笔交收明细与记录状态同事务保存；来源单号重复时返回None。"""
+        now = _now()
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute("SELECT version FROM records WHERE id=?", (record_id,)).fetchone()
+            if row is None:
+                connection.rollback()
+                raise NotFound("记录不存在")
+            if int(row["version"]) != int(expected_version):
+                connection.rollback()
+                raise Conflict("版本冲突，请刷新后重试")
+            try:
+                connection.execute(
+                    "INSERT INTO settlement_entries(record_id,source_ref,quantity,amount,operator,created_at) VALUES(?,?,?,?,?,?)",
+                    (record_id, entry["source_ref"], entry["quantity"], entry["amount"], entry["operator"], now),
+                )
+            except sqlite3.IntegrityError:
+                connection.rollback()
+                return None
             version = int(expected_version) + 1
             connection.execute(
                 "UPDATE records SET state=?,version=?,payload=?,updated_by=?,updated_at=? WHERE id=?",
