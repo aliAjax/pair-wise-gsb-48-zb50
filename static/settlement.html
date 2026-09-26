@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>大额交收 · 逐笔累计</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #17212b; }
+    main { max-width: 1080px; margin: auto; }
+    button { padding: .5rem .9rem; cursor: pointer; }
+    pre { background: #f4f6f8; padding: 1rem; overflow: auto; border-radius: 8px; }
+    fieldset { border: 1px solid #d6dce3; border-radius: 8px; margin: 1rem 0; padding: 1rem; }
+    legend { font-weight: 600; padding: 0 .4rem; }
+    label { display: inline-block; margin: .25rem .6rem .25rem 0; }
+    input { padding: .4rem .5rem; border: 1px solid #c2cad3; border-radius: 6px; }
+    table { border-collapse: collapse; width: 100%; margin-top: .6rem; }
+    th, td { border: 1px solid #d6dce3; padding: .4rem .6rem; text-align: left; font-size: .92rem; }
+    .badge { display: inline-block; padding: .15rem .55rem; border-radius: 999px; font-size: .82rem; color: #fff; }
+    .processing { background: #b7791f; }
+    .settled { background: #2f855a; }
+    .reversed { background: #9b2c2c; }
+    .entry-return { color: #9b2c2c; }
+    .msg { margin: .6rem 0; color: #2a4365; }
+    .err { color: #9b2c2c; }
+    a { color: #2b6cb0; }
+  </style>
+</head>
+<body>
+<main>
+  <h1>大额交收 · 逐笔累计</h1>
+  <p><a href="/">← 返回主页</a>　一次备齐才结清；每笔登记数量、金额、来源单号、经办人，累计达标才过账。</p>
+
+  <fieldset>
+    <legend>1. 建立大额交收指令</legend>
+    <label>指令编号 <input id="ref" value="SET-0001"></label>
+    <label>应到数量 <input id="reqQty" type="number" value="1000"></label>
+    <label>应到金额 <input id="reqAmt" type="number" step="0.01" value="10000.00"></label>
+    <button id="createBtn">建立指令</button>
+  </fieldset>
+
+  <fieldset>
+    <legend>2. 登记一笔到账</legend>
+    <label>数量 <input id="qty" type="number" value="600"></label>
+    <label>金额 <input id="amt" type="number" step="0.01" value="6000.00"></label>
+    <label>来源单号 <input id="src" value="SRC-A"></label>
+    <label>经办人 <input id="op" value="张三"></label>
+    <button id="registerBtn">登记到账</button>
+  </fieldset>
+
+  <div class="row"><button id="refreshBtn">刷新指令</button> <button id="reverseBtn">冲正（保留到账，退回未完成）</button> <button id="listBtn">全部指令</button></div>
+  <div id="message" class="msg"></div>
+  <div id="summary"></div>
+  <div id="entries"></div>
+  <pre id="raw"></pre>
+</main>
+<script>
+const headers = {"X-User-Id":"demo-officer","X-Role":"settlement_officer","X-Org":"demo","Content-Type":"application/json"};
+let currentId = null;
+
+function setMessage(text, isError) {
+  const el = document.getElementById("message");
+  el.textContent = text;
+  el.className = isError ? "err" : "msg";
+}
+
+async function call(method, path, body) {
+  const response = await fetch(path, {method, headers, body: body ? JSON.stringify(body) : undefined});
+  const data = await response.json();
+  if (!response.ok) throw new Error("[" + response.status + "] " + (data.message || data.error || "请求失败"));
+  return data;
+}
+
+function render(view) {
+  currentId = view.id;
+  const statusText = view.status_label + "（" + view.status + "）";
+  let html = "<h3>指令 " + view.reference +
+    " <span class='badge " + view.status + "'>" + statusText + "</span></h3>" +
+    "<p>应到：数量 " + view.required_quantity + " / 金额 " + view.required_amount.toFixed(2) + "<br>" +
+    "已到账：数量 " + view.accumulated_quantity + " / 金额 " + Number(view.accumulated_amount).toFixed(2) + "（共 " + view.entry_count + " 笔）<br>";
+  if (view.status === "processing") {
+    html += "<strong>处理中，还差：数量 " + view.remaining_quantity + " / 金额 " + Number(view.remaining_amount).toFixed(2) + "</strong>";
+  } else if (view.status === "settled") {
+    html += "<strong>已备齐结清，可过账</strong>";
+  } else {
+    html += "<strong>已冲正，未完成部分已退回</strong>";
+  }
+  html += "</p>";
+  document.getElementById("summary").innerHTML = html;
+
+  let rows = view.entries.map(e => {
+    const kind = e.entry_type === "return"
+      ? "<span class='entry-return'>冲正退回</span>"
+      : "到账";
+    const operator = e.operator || "—";
+    const note = e.note || "";
+    return "<tr><td>" + e.seq + "</td><td>" + kind + "</td><td>" + e.quantity +
+      "</td><td>" + Number(e.amount).toFixed(2) + "</td><td>" + e.source_ref +
+      "</td><td>" + operator + "</td><td>" + note + "</td></tr>";
+  }).join("");
+  document.getElementById("entries").innerHTML = view.entries.length
+    ? "<table><thead><tr><th>#</th><th>类型</th><th>数量</th><th>金额</th><th>来源单号</th><th>经办人</th><th>备注</th></tr></thead><tbody>" + rows + "</tbody></table>"
+    : "<p>尚无到账明细。</p>";
+  document.getElementById("raw").textContent = JSON.stringify(view, null, 2);
+}
+
+async function showView(promise) {
+  try {
+    const view = await promise;
+    render(view);
+    setMessage("操作成功", false);
+  } catch (err) {
+    setMessage(err.message, true);
+  }
+}
+
+document.getElementById("createBtn").onclick = () => showView((async () => {
+  const view = await call("POST", "/api/settlements", {
+    reference: document.getElementById("ref").value.trim(),
+    data: {
+      required_quantity: Number(document.getElementById("reqQty").value),
+      required_amount: Number(document.getElementById("reqAmt").value)
+    }
+  });
+  return view;
+})());
+
+document.getElementById("registerBtn").onclick = () => {
+  if (!currentId) { setMessage("请先建立指令", true); return; }
+  showView(call("POST", "/api/settlements/" + currentId + "/entries", {data: {
+    quantity: Number(document.getElementById("qty").value),
+    amount: Number(document.getElementById("amt").value),
+    source_ref: document.getElementById("src").value.trim(),
+    operator: document.getElementById("op").value.trim()
+  }}));
+};
+
+document.getElementById("refreshBtn").onclick = () => {
+  if (!currentId) { setMessage("请先建立指令", true); return; }
+  showView(call("GET", "/api/settlements/" + currentId));
+};
+
+document.getElementById("reverseBtn").onclick = () => {
+  if (!currentId) { setMessage("请先建立指令", true); return; }
+  const reason = prompt("请输入冲正原因", "大额交收冲正");
+  if (!reason) return;
+  showView(call("POST", "/api/settlements/" + currentId + "/reverse", {data: {reverse_reason: reason}}));
+};
+
+document.getElementById("listBtn").onclick = async () => {
+  try {
+    const data = await call("GET", "/api/settlements?limit=20");
+    document.getElementById("raw").textContent = JSON.stringify(data, null, 2);
+    if (data.items.length) render(data.items[0]);
+    setMessage("已加载 " + data.items.length + " 条指令", false);
+  } catch (err) {
+    setMessage(err.message, true);
+  }
+};
+</script>
+</body>
+</html>

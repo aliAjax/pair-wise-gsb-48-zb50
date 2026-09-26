@@ -7,6 +7,7 @@ from typing import Any, Dict
 from urllib.parse import parse_qs, urlparse
 
 from .domain import Actor, DomainError, PermissionDenied, ValidationError
+from .settlement_http_api import SettlementApi
 
 
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
@@ -14,7 +15,8 @@ ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
 
 
-def make_handler(service: Any, static_dir: Path):
+def make_handler(service: Any, static_dir: Path, settlement_service: Any = None):
+    settlement_api = SettlementApi(settlement_service) if settlement_service is not None else None
     class Handler(BaseHTTPRequestHandler):
         server_version = "securities-settlement/1.0"
 
@@ -65,12 +67,22 @@ def make_handler(service: Any, static_dir: Path):
             try:
                 parsed = urlparse(self.path)
                 if parsed.path == "/health":
-                    self._send(200, {"status": "ok", "service": "securities-settlement", "database": service.repository.health()})
+                    database_ok = service.repository.health() and (settlement_service is None or settlement_service.repository.health())
+                    self._send(200, {"status": "ok", "service": "securities-settlement", "database": database_ok})
                     return
                 if parsed.path == "/":
                     page = (static_dir / "index.html").read_bytes()
                     self._send(200, page, "text/html; charset=utf-8")
                     return
+                if parsed.path == "/settlement":
+                    page = (static_dir / "settlement.html").read_bytes()
+                    self._send(200, page, "text/html; charset=utf-8")
+                    return
+                if settlement_api is not None and parsed.path.startswith("/api/settlements"):
+                    result = settlement_api.handle_get(self._actor(), parsed.path, parsed.query)
+                    if result is not None:
+                        self._send(result[0], result[1])
+                        return
                 if parsed.path == "/api/records":
                     query = parse_qs(parsed.query)
                     records = service.list_records(self._actor(), state=query.get("state", [None])[0], limit=int(query.get("limit", ["100"])[0]))
@@ -95,6 +107,11 @@ def make_handler(service: Any, static_dir: Path):
             try:
                 parsed = urlparse(self.path)
                 body = self._body()
+                if settlement_api is not None and parsed.path.startswith("/api/settlements"):
+                    result = settlement_api.handle_post(self._actor(), parsed.path, body)
+                    if result is not None:
+                        self._send(result[0], result[1])
+                        return
                 if parsed.path == "/api/records":
                     record = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
                     self._send(201, record)
@@ -114,5 +131,5 @@ def make_handler(service: Any, static_dir: Path):
     return Handler
 
 
-def create_server(host: str, port: int, service: Any, static_dir: Path) -> ThreadingHTTPServer:
-    return ThreadingHTTPServer((host, port), make_handler(service, static_dir))
+def create_server(host: str, port: int, service: Any, static_dir: Path, settlement_service: Any = None) -> ThreadingHTTPServer:
+    return ThreadingHTTPServer((host, port), make_handler(service, static_dir, settlement_service))

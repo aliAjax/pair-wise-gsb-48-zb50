@@ -7,6 +7,8 @@ from src.http_api import create_server
 from src.repository import Repository
 from src.rules import DomainRules
 from src.service import Service
+from src.settlement_repository import SettlementRepository
+from src.settlement_service import SettlementService
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -18,6 +20,10 @@ def build_service(db_path: str) -> Service:
     repository = Repository(db_path)
     audit = AuditRecorder(repository)
     return Service(repository, DomainRules(), audit)
+
+
+def build_settlement_service(db_path: str) -> SettlementService:
+    return SettlementService(SettlementRepository(db_path))
 
 
 def parse_args():
@@ -32,7 +38,8 @@ def main() -> None:
     args = parse_args()
     Path(args.db).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
     service = build_service(args.db)
-    server = create_server(args.host, args.port, service, BASE_DIR / "static")
+    settlement_service = build_settlement_service(args.db)
+    server = create_server(args.host, args.port, service, BASE_DIR / "static", settlement_service)
     print("证券结算与企业行动处理 listening on http://%s:%s" % (args.host, args.port), flush=True)
     try:
         server.serve_forever()
